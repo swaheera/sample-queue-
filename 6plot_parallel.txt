@@ -1,0 +1,273 @@
+# Load required libraries
+library(tidyverse)
+library(patchwork)
+library(parallel)
+library(foreach)
+library(doParallel)
+
+# Simulation parameters
+k <- 3       # number of servers
+lambda <- 2  # arrival rate
+mu <- 1      # service rate per server
+T <- 100     # simulation time
+n_sims <- 20 # number of simulations
+initial_n <- 100  # initial queue length
+dt <- 0.05   # time step
+wait_thresholds <- c(5, 10, 15, 20, 25)  # wait time thresholds
+
+# Calculate number of steps
+n_steps <- ceiling(T/dt)
+
+# Set up parallel processing
+n_cores <- detectCores() - 1  # Leave one core free
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+# Enhanced simulation function
+simulate_mmk <- function(params) {
+    k <- params$k
+    lambda <- params$lambda
+    mu <- params$mu
+    T <- params$T
+    dt <- params$dt
+    initial_n <- params$initial_n
+    sim_number <- params$sim_number
+    wait_thresholds <- params$wait_thresholds
+    n_steps <- ceiling(T/dt)
+    
+    # Pre-allocate vectors
+    queue_length <- numeric(n_steps)
+    processed <- numeric(n_steps)
+    waiting_times <- numeric(n_steps)
+    estimated_wait <- numeric(n_steps)
+    
+    # Create matrices for threshold tracking
+    wait_counts <- matrix(0, nrow = n_steps, ncol = length(wait_thresholds))
+    wait_pcts <- matrix(0, nrow = n_steps, ncol = length(wait_thresholds))
+    colnames(wait_counts) <- paste0("wait_", wait_thresholds)
+    colnames(wait_pcts) <- paste0("pct_", wait_thresholds)
+    
+    # Initialize
+    queue_length[1] <- initial_n
+    processed[1] <- 0
+    waiting_times[1] <- 0
+    estimated_wait[1] <- 0
+    
+    # Customer tracking matrix
+    customer_matrix <- matrix(
+        c(rep(0, initial_n), 1:initial_n),
+        ncol = 2,
+        dimnames = list(NULL, c("arrival_time", "position"))
+    )
+    
+    # Pre-generate random numbers
+    arrivals <- rpois(n_steps, lambda * dt)
+    departures <- rpois(n_steps, k * mu * dt)
+    
+    # Main simulation loop
+    for(i in 2:n_steps) {
+        current_n <- queue_length[i-1]
+        current_time <- (i-1) * dt
+        
+        # Handle arrivals
+        arrival <- arrivals[i]
+        if(arrival > 0) {
+            new_customers <- matrix(
+                c(rep(current_time, arrival), 
+                  (nrow(customer_matrix) + 1):(nrow(customer_matrix) + arrival)),
+                ncol = 2
+            )
+            customer_matrix <- rbind(customer_matrix, new_customers)
+        }
+        
+        # Handle departures
+        departure <- min(departures[i], min(current_n, nrow(customer_matrix)))
+        if(departure > 0 && nrow(customer_matrix) > 0) {
+            waiting_times[i] <- mean(current_time - customer_matrix[1:departure, 1])
+            customer_matrix <- customer_matrix[-(1:departure), , drop = FALSE]
+        } else {
+            waiting_times[i] <- waiting_times[i-1]
+        }
+        
+        # Calculate threshold metrics
+        if(nrow(customer_matrix) > 0) {
+            current_wait_times <- current_time - customer_matrix[,1]
+            for(j in seq_along(wait_thresholds)) {
+                wait_counts[i, j] <- sum(current_wait_times > wait_thresholds[j])
+                wait_pcts[i, j] <- (wait_counts[i, j] / nrow(customer_matrix)) * 100
+            }
+        }
+        
+        # Estimate waiting time
+        estimated_wait[i] <- if(current_n > k) (current_n - k) / (k * mu) else 0
+        
+        # Update queue length and processed count
+        queue_length[i] <- current_n + arrival - departure
+        processed[i] <- processed[i-1] + departure
+    }
+    
+    data.frame(
+        time = seq(0, T-dt, length.out=n_steps),
+        queue_length = queue_length,
+        processed = processed,
+        waiting_time = waiting_times,
+        estimated_wait = estimated_wait,
+        wait_counts,
+        wait_pcts,
+        simulation = factor(sim_number)
+    )
+}
+
+# Create parameter list for simulations
+params_list <- lapply(1:n_sims, function(sim_id) {
+    list(k=k, lambda=lambda, mu=mu, T=T, dt=dt, 
+         initial_n=initial_n, sim_number=sim_id,
+         wait_thresholds=wait_thresholds)
+})
+
+# Run parallel simulations
+sim_data <- foreach(params = params_list, 
+                   .packages = c("tidyverse"),
+                   .combine = rbind) %dopar% {
+    set.seed(123 + params$sim_number)
+    simulate_mmk(params)
+}
+
+# Stop cluster
+stopCluster(cl)
+
+# Calculate mean trajectories for basic metrics
+mean_trajectories <- sim_data %>%
+    group_by(time) %>%
+    summarise(
+        mean_length = mean(queue_length),
+        mean_processed = mean(processed),
+        mean_waiting = mean(waiting_time),
+        mean_estimated = mean(estimated_wait)
+    )
+
+# Calculate threshold trajectories
+mean_counts <- sim_data %>%
+    group_by(time) %>%
+    summarise(across(starts_with("wait_"), mean)) %>%
+    pivot_longer(
+        cols = starts_with("wait_"),
+        names_to = "threshold",
+        values_to = "count",
+        names_prefix = "wait_"
+    ) %>%
+    mutate(threshold = factor(threshold, 
+                            levels = as.character(wait_thresholds),
+                            labels = paste(wait_thresholds, "iterations")))
+
+mean_pcts <- sim_data %>%
+    group_by(time) %>%
+    summarise(across(starts_with("pct_"), mean)) %>%
+    pivot_longer(
+        cols = starts_with("pct_"),
+        names_to = "threshold",
+        values_to = "percentage",
+        names_prefix = "pct_"
+    ) %>%
+    mutate(threshold = factor(threshold, 
+                            levels = as.character(wait_thresholds),
+                            labels = paste(wait_thresholds, "iterations")))
+
+# Calculate theoretical mean
+rho <- lambda/(k*mu)
+theoretical_mean <- if(rho < 1) {
+    (lambda^2)/(mu*(mu-lambda)) + lambda/mu
+} else {
+    NA
+}
+
+# Create all six plots
+p1 <- ggplot() +
+    geom_line(data = sim_data, 
+              aes(x = time, y = queue_length, group = simulation),
+              color = "black", alpha = 0.1) +
+    geom_line(data = mean_trajectories,
+              aes(x = time, y = mean_length),
+              color = "red", size = 1) +
+    {if(!is.na(theoretical_mean)) 
+        geom_hline(yintercept = theoretical_mean, 
+                   linetype = "dashed", 
+                   color = "red", 
+                   alpha = 0.5)} +
+    labs(title = "Queue Length Over Time",
+         x = "Time", y = "Queue Length") +
+    theme_minimal()
+
+p2 <- ggplot() +
+    geom_line(data = sim_data, 
+              aes(x = time, y = processed, group = simulation),
+              color = "black", alpha = 0.1) +
+    geom_line(data = mean_trajectories,
+              aes(x = time, y = mean_processed),
+              color = "red", size = 1) +
+    labs(title = "Cumulative Processed Customers",
+         x = "Time", y = "Number of Processed Customers") +
+    theme_minimal()
+
+p3 <- ggplot() +
+    geom_line(data = sim_data, 
+              aes(x = time, y = waiting_time, group = simulation),
+              color = "black", alpha = 0.1) +
+    geom_line(data = mean_trajectories,
+              aes(x = time, y = mean_waiting),
+              color = "red", size = 1) +
+    labs(title = "Current Customer Waiting Time",
+         x = "Time", y = "Waiting Time") +
+    theme_minimal()
+
+p4 <- ggplot() +
+    geom_line(data = sim_data, 
+              aes(x = time, y = estimated_wait, group = simulation),
+              color = "black", alpha = 0.1) +
+    geom_line(data = mean_trajectories,
+              aes(x = time, y = mean_estimated),
+              color = "red", size = 1) +
+    labs(title = "Estimated Waiting Time for New Arrivals",
+         x = "Time", y = "Estimated Wait Time") +
+    theme_minimal()
+
+p5 <- ggplot(mean_counts, 
+             aes(x = time, y = count, color = threshold)) +
+    geom_line(size = 1) +
+    scale_color_viridis_d(end = 0.9) +
+    labs(title = "Number of Customers Exceeding Wait Time Thresholds",
+         x = "Time",
+         y = "Number of Customers",
+         color = "Wait Time\nThreshold") +
+    theme_minimal() +
+    theme(legend.position = "right")
+
+p6 <- ggplot(mean_pcts, 
+             aes(x = time, y = percentage, color = threshold)) +
+    geom_line(size = 1) +
+    scale_color_viridis_d(end = 0.9) +
+    labs(title = "Percentage of Customers Exceeding Wait Time Thresholds",
+         x = "Time",
+         y = "Percentage of Customers",
+         color = "Wait Time\nThreshold") +
+    theme_minimal() +
+    theme(legend.position = "right")
+
+# Combine all plots
+final_plot <- (p1 + p2 + p3) / (p4 + p5 + p6) +
+    plot_layout(guides = "collect") +
+    plot_annotation(
+        title = "Queue Simulation Results",
+        subtitle = sprintf("Servers: %d, Arrival rate: %.1f/day, Service rate: %.1f/day, Initial queue: %d, Time: %d days, Sims: %d",
+                         k, lambda, mu, initial_n, T, n_sims),
+        theme = theme(
+            plot.title = element_text(size = 16, face = "bold"),
+            plot.subtitle = element_text(size = 10)
+        )
+    )
+
+# Display plot
+print(final_plot)
+
+# Save plot
+ggsave("queue_simulation_results.png", final_plot, width = 15, height = 10, dpi = 300)
