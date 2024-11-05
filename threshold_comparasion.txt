@@ -1,0 +1,158 @@
+library(tidyverse)
+
+# Simulation parameters
+k <- 3        # number of servers
+lambda <- 2   # arrival rate
+mu <- 1       # service rate per server
+T <- 100      # simulation time
+n_sims <- 20  # number of simulations
+dt <- 0.01    # time step
+initial_n <- 100  # initial queue length
+wait_thresholds <- c(5, 10, 15, 20, 25)  # multiple thresholds to track
+
+# Enhanced simulation function to track waiting times
+simulate_mmk <- function(k, lambda, mu, T, dt, initial_n, wait_thresholds) {
+    n_steps <- T/dt
+    queue_length <- numeric(n_steps)
+    processed <- numeric(n_steps)
+    
+    # Create matrices to store counts and percentages for each threshold
+    wait_counts <- matrix(0, nrow = n_steps, ncol = length(wait_thresholds))
+    wait_pcts <- matrix(0, nrow = n_steps, ncol = length(wait_thresholds))
+    colnames(wait_counts) <- paste0("wait_", wait_thresholds)
+    colnames(wait_pcts) <- paste0("pct_", wait_thresholds)
+    
+    queue_length[1] <- initial_n
+    processed[1] <- 0
+    
+    # Initialize customer tracking with arrival times
+    customer_queue <- data.frame(
+        arrival_time = rep(0, initial_n),
+        position = 1:initial_n
+    )
+    
+    for(i in 2:n_steps) {
+        current_n <- queue_length[i-1]
+        current_time <- (i-1) * dt
+        
+        # Calculate transition probabilities
+        p_arrival <- lambda * dt
+        p_departure <- min(current_n, k) * mu * dt
+        
+        # Generate random events
+        arrival <- rbinom(1, 1, p_arrival)
+        departure <- rbinom(1, 1, p_departure)
+        
+        # Handle arrivals
+        if(arrival == 1) {
+            customer_queue <- rbind(customer_queue,
+                                    data.frame(arrival_time = current_time,
+                                               position = nrow(customer_queue) + 1))
+        }
+        
+        # Handle departures
+        if(departure == 1 && nrow(customer_queue) > 0) {
+            customer_queue <- customer_queue[-1,]
+        }
+        
+        # Calculate counts and percentages for each waiting time threshold
+        if(nrow(customer_queue) > 0) {
+            current_wait_times <- current_time - customer_queue$arrival_time
+            for(j in seq_along(wait_thresholds)) {
+                wait_counts[i, j] <- sum(current_wait_times > wait_thresholds[j])
+                wait_pcts[i, j] <- (wait_counts[i, j] / nrow(customer_queue)) * 100
+            }
+        }
+        
+        # Update queue length and processed count
+        queue_length[i] <- current_n + arrival - departure
+        processed[i] <- processed[i-1] + departure
+    }
+    
+    # Combine all data into a data frame
+    data.frame(
+        time = seq(0, T-dt, by=dt),
+        queue_length = queue_length,
+        processed = processed,
+        wait_counts,
+        wait_pcts
+    )
+}
+
+# Run multiple simulations
+set.seed(123)
+sim_data <- map_dfr(1:n_sims, function(sim_id) {
+    simulate_mmk(k, lambda, mu, T, dt, initial_n, wait_thresholds) %>%
+        mutate(simulation = factor(sim_id))
+})
+
+# Calculate mean trajectories for counts
+mean_counts <- sim_data %>%
+    group_by(time) %>%
+    summarise(across(starts_with("wait_"), mean)) %>%
+    pivot_longer(
+        cols = starts_with("wait_"),
+        names_to = "threshold",
+        values_to = "count",
+        names_prefix = "wait_"
+    ) %>%
+    mutate(threshold = factor(threshold, 
+                              levels = as.character(wait_thresholds),
+                              labels = paste(wait_thresholds, "iterations")))
+
+# Calculate mean trajectories for percentages
+mean_pcts <- sim_data %>%
+    group_by(time) %>%
+    summarise(across(starts_with("pct_"), mean)) %>%
+    pivot_longer(
+        cols = starts_with("pct_"),
+        names_to = "threshold",
+        values_to = "percentage",
+        names_prefix = "pct_"
+    ) %>%
+    mutate(threshold = factor(threshold, 
+                              levels = as.character(wait_thresholds),
+                              labels = paste(wait_thresholds, "iterations")))
+
+# Create the absolute numbers plot
+p1 <- ggplot(mean_counts, 
+             aes(x = time, y = count, color = threshold)) +
+    geom_line(size = 1) +
+    scale_color_viridis_d(end = 0.9) +
+    labs(
+        title = "Number of Customers Exceeding Wait Time Thresholds",
+        subtitle = paste("λ =", lambda, ", μ =", mu, "per server, k =", k, "servers"),
+        x = "Time",
+        y = "Number of Customers",
+        color = "Wait Time\nThreshold"
+    ) +
+    theme_minimal() +
+    theme(
+        plot.title = element_text(size = 12, face = "bold"),
+        plot.subtitle = element_text(size = 10),
+        legend.position = "bottom"
+    )
+
+# Create the percentages plot
+p2 <- ggplot(mean_pcts, 
+             aes(x = time, y = percentage, color = threshold)) +
+    geom_line(size = 1) +
+    scale_color_viridis_d(end = 0.9) +
+    labs(
+        title = "Percentage of Customers Exceeding Wait Time Thresholds",
+        subtitle = paste("λ =", lambda, ", μ =", mu, "per server, k =", k, "servers"),
+        x = "Time",
+        y = "Percentage of Customers in System",
+        color = "Wait Time\nThreshold"
+    ) +
+    theme_minimal() +
+    theme(
+        plot.title = element_text(size = 12, face = "bold"),
+        plot.subtitle = element_text(size = 10),
+        legend.position = "bottom"
+    )
+
+# Combine plots side by side
+library(patchwork)
+p1 + p2 + plot_layout(guides = "collect") &
+    theme(legend.position = "bottom")
