@@ -1,5 +1,5 @@
 # Load required libraries
-library(tidyverse)
+library(ggplot2)
 library(patchwork)
 library(parallel)
 library(foreach)
@@ -127,7 +127,7 @@ params_list <- lapply(1:n_sims, function(sim_id) {
 
 # Run parallel simulations
 sim_data <- foreach(params = params_list, 
-                   .packages = c("tidyverse"),
+                   .packages = c("stats"),
                    .combine = rbind) %dopar% {
     set.seed(123 + params$sim_number)
     simulate_mmk(params)
@@ -137,41 +137,45 @@ sim_data <- foreach(params = params_list,
 stopCluster(cl)
 
 # Calculate mean trajectories for basic metrics
-mean_trajectories <- sim_data %>%
-    group_by(time) %>%
-    summarise(
-        mean_length = mean(queue_length),
-        mean_processed = mean(processed),
-        mean_waiting = mean(waiting_time),
-        mean_estimated = mean(estimated_wait)
-    )
+time_points <- unique(sim_data$time)
+mean_trajectories <- data.frame(
+    time = time_points,
+    mean_length = tapply(sim_data$queue_length, sim_data$time, mean),
+    mean_processed = tapply(sim_data$processed, sim_data$time, mean),
+    mean_waiting = tapply(sim_data$waiting_time, sim_data$time, mean),
+    mean_estimated = tapply(sim_data$estimated_wait, sim_data$time, mean)
+)
 
 # Calculate threshold trajectories
-mean_counts <- sim_data %>%
-    group_by(time) %>%
-    summarise(across(starts_with("wait_"), mean)) %>%
-    pivot_longer(
-        cols = starts_with("wait_"),
-        names_to = "threshold",
-        values_to = "count",
-        names_prefix = "wait_"
-    ) %>%
-    mutate(threshold = factor(threshold, 
-                            levels = as.character(wait_thresholds),
-                            labels = paste(wait_thresholds, "iterations")))
+# First for counts
+wait_cols <- grep("^wait_", colnames(sim_data), value = TRUE)
+mean_counts_data <- lapply(wait_cols, function(col) {
+    means <- tapply(sim_data[[col]], sim_data$time, mean)
+    data.frame(
+        time = time_points,
+        count = means,
+        threshold = sub("wait_", "", col)
+    )
+})
+mean_counts <- do.call(rbind, mean_counts_data)
+mean_counts$threshold <- factor(mean_counts$threshold,
+                              levels = as.character(wait_thresholds),
+                              labels = paste(wait_thresholds, "iterations"))
 
-mean_pcts <- sim_data %>%
-    group_by(time) %>%
-    summarise(across(starts_with("pct_"), mean)) %>%
-    pivot_longer(
-        cols = starts_with("pct_"),
-        names_to = "threshold",
-        values_to = "percentage",
-        names_prefix = "pct_"
-    ) %>%
-    mutate(threshold = factor(threshold, 
+# Then for percentages
+pct_cols <- grep("^pct_", colnames(sim_data), value = TRUE)
+mean_pcts_data <- lapply(pct_cols, function(col) {
+    means <- tapply(sim_data[[col]], sim_data$time, mean)
+    data.frame(
+        time = time_points,
+        percentage = means,
+        threshold = sub("pct_", "", col)
+    )
+})
+mean_pcts <- do.call(rbind, mean_pcts_data)
+mean_pcts$threshold <- factor(mean_pcts$threshold,
                             levels = as.character(wait_thresholds),
-                            labels = paste(wait_thresholds, "iterations")))
+                            labels = paste(wait_thresholds, "iterations"))
 
 # Calculate theoretical mean
 rho <- lambda/(k*mu)
