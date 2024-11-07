@@ -1,0 +1,90 @@
+# Required packages
+library(forecast)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(zoo)
+library(gridExtra)
+
+# Create simulated data
+set.seed(123)
+dates <- seq(as.yearmon("Jan 2020"), length.out = 48, by = 1/12)
+mydf <- data.frame(
+    date = dates,
+    var1 = rnorm(48, mean = 100, sd = 15)
+)
+
+# Fit model and create forecasts
+n_total <- nrow(mydf)
+n_test <- 6
+n_train <- n_total - n_test
+
+# Split data
+train_data <- mydf[1:n_train, ]
+test_data <- mydf[(n_train + 1):n_total, ]
+
+# Fit model
+ts_train <- ts(train_data$var1, frequency = 12)
+model <- auto.arima(ts_train)
+forecast_result <- forecast(model, h = n_test)
+
+# Create dataframe for plotting with overlap point
+result_df <- data.frame(
+    date = mydf$date,
+    actual = mydf$var1,
+    fitted = c(model$fitted, rep(NA, n_test)),
+    forecast = c(rep(NA, n_train - 1),  # One less NA to make room for overlap
+                 train_data$var1[n_train],  # Add overlap point
+                 forecast_result$mean),
+    lower = c(rep(NA, n_train - 1),
+              train_data$var1[n_train],
+              forecast_result$lower[, 2]),
+    upper = c(rep(NA, n_train - 1),
+              train_data$var1[n_train],
+              forecast_result$upper[, 2])
+)
+
+# Calculate metrics
+test_actual <- test_data$var1
+test_forecast <- forecast_result$mean
+metrics <- data.frame(
+    RMSE = sqrt(mean((test_actual - test_forecast)^2)),
+    MAPE = mean(abs((test_actual - test_forecast) / test_actual)) * 100,
+    Sum_Pct_Error = ((sum(test_forecast) - sum(test_actual)) / sum(test_actual)) * 100
+)
+
+# Create base plot
+base_plot <- ggplot(result_df, aes(x = date)) +
+    geom_line(aes(y = actual, color = "Actual"), size = 1) +
+    geom_line(aes(y = forecast, color = "Forecast"), size = 1, linetype = "dashed") +
+    theme_minimal() +
+    labs(subtitle = sprintf("RMSE: %.1f | MAPE: %.1f%% | Sum Error: %.1f%%", 
+                            metrics$RMSE, 
+                            metrics$MAPE,
+                            metrics$Sum_Pct_Error),
+         x = "Date",
+         y = "Value") +
+    scale_color_manual(values = c("Actual" = "black", "Forecast" = "blue"),
+                       name = "") +
+    theme(legend.position = "bottom",
+          plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5),
+          panel.grid.minor = element_blank())
+
+# Create two versions of the plot
+p1 <- base_plot +
+    geom_ribbon(aes(ymin = lower, ymax = upper),
+                fill = "blue", alpha = 0.1) +
+    labs(title = "Forecast with Confidence Intervals")
+
+p2 <- base_plot +
+    labs(title = "Forecast without Confidence Intervals")
+
+# Display plots side by side
+grid.arrange(p1, p2, ncol = 2)
+
+# Print model summary and metrics
+cat("\nModel Summary:\n")
+print(summary(model))
+cat("\nForecast Accuracy Metrics:\n")
+print(metrics)
