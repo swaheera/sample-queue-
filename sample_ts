@@ -1,0 +1,111 @@
+# Required packages
+library(forecast)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(zoo)
+
+# Create simulated data
+set.seed(123)
+
+# Generate dates (48 months from Jan 2020)
+dates <- seq(as.yearmon("Jan 2020"), length.out = 48, by = 1/12)
+
+# Simple random data generation
+mydf <- data.frame(
+    date = dates,
+    var1 = rnorm(48, mean = 100, sd = 15),
+    var2 = rnorm(48, mean = 50, sd = 10),
+    var3 = rnorm(48, mean = 150, sd = 20),
+    var4 = rnorm(48, mean = 75, sd = 12)
+)
+
+# Fit auto.arima and create forecasts for each variable
+fit_and_forecast <- function(data, variable, h = 24) {
+    ts_data <- ts(data[[variable]], frequency = 12)
+    model <- auto.arima(ts_data)
+    forecast_result <- forecast(model, h = h)
+    
+    dates <- seq(from = min(data$date), 
+                 by = 1/12, 
+                 length.out = length(ts_data) + h)
+    
+    result_df <- data.frame(
+        date = dates,
+        value = c(ts_data, forecast_result$mean),
+        lower = c(rep(NA, length(ts_data)), forecast_result$lower[, 2]),
+        upper = c(rep(NA, length(ts_data)), forecast_result$upper[, 2]),
+        variable = variable,
+        type = c(rep("Historical", length(ts_data)), 
+                 rep("Forecast", h))
+    )
+    
+    return(list(
+        forecast_df = result_df,
+        model = model
+    ))
+}
+
+# Process all variables and create both plots
+analyze_and_plot <- function(mydf) {
+    # Fit models and get forecasts for each variable
+    variables <- c("var1", "var2", "var3", "var4")
+    all_results <- lapply(variables, function(var) {
+        fit_and_forecast(mydf, var)
+    })
+    
+    # Combine all forecast dataframes
+    all_forecasts <- do.call(rbind, lapply(all_results, function(x) x$forecast_df))
+    
+    # Base plot theme and elements
+    base_plot <- ggplot(all_forecasts, aes(x = date, y = value, color = variable)) +
+        theme_minimal() +
+        labs(x = "Date",
+             y = "Value") +
+        scale_linetype_manual(values = c("Historical" = "solid", 
+                                         "Forecast" = "dashed")) +
+        scale_color_brewer(palette = "Set1") +
+        scale_fill_brewer(palette = "Set1") +
+        theme(legend.position = "bottom",
+              legend.box = "vertical",
+              plot.title = element_text(hjust = 0.5),
+              panel.grid.minor = element_blank())
+    
+    # Plot with confidence intervals
+    p1 <- base_plot +
+        geom_line(aes(linetype = type), size = 1) +
+        geom_ribbon(aes(ymin = lower, ymax = upper, fill = variable), 
+                    alpha = 0.1, color = NA) +
+        labs(title = "Forecasts with Confidence Intervals") +
+        guides(fill = "none",
+               color = guide_legend(title = "Variable"),
+               linetype = guide_legend(title = "Type"))
+    
+    # Plot without confidence intervals
+    p2 <- base_plot +
+        geom_line(aes(linetype = type), size = 1) +
+        labs(title = "Forecasts without Confidence Intervals") +
+        guides(color = guide_legend(title = "Variable"),
+               linetype = guide_legend(title = "Type"))
+    
+    # Print model summaries
+    for(i in seq_along(variables)) {
+        cat("\nModel Summary for", variables[i], ":\n")
+        print(summary(all_results[[i]]$model))
+    }
+    
+    return(list(
+        with_intervals = p1,
+        without_intervals = p2
+    ))
+}
+
+# Run the analysis and create both plots
+plots <- analyze_and_plot(mydf)
+
+# Display both plots
+print(plots$with_intervals)
+print(plots$without_intervals)
+
+# View the first few rows of the data
+head(mydf)
