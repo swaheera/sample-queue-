@@ -1,0 +1,114 @@
+# Required packages
+library(forecast)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(lubridate)
+
+# Create simulated data
+set.seed(123) # for reproducibility
+
+# Generate dates
+dates <- seq(as.Date("2020-01-01"), as.Date("2023-12-01"), by = "month")
+
+# Function to generate realistic time series with trend, seasonality, and noise
+generate_ts <- function(n, trend = 0.1, seasonal_amp = 5, noise_level = 2) {
+  # Trend component
+  trend_comp <- seq(1, n) * trend
+  
+  # Seasonal component (12-month cycle)
+  seasonal_comp <- seasonal_amp * sin(2 * pi * seq(1, n) / 12)
+  
+  # Random noise
+  noise <- rnorm(n, 0, noise_level)
+  
+  # Combine components
+  return(trend_comp + seasonal_comp + noise + 50) # Add base level
+}
+
+# Generate simulated data frame
+n_months <- length(dates)
+mydf <- data.frame(
+  date = format(dates, "%b %Y"),
+  var1 = generate_ts(n_months, trend = 0.2, seasonal_amp = 8, noise_level = 2),
+  var2 = generate_ts(n_months, trend = -0.1, seasonal_amp = 4, noise_level = 1.5),
+  var3 = generate_ts(n_months, trend = 0.15, seasonal_amp = 6, noise_level = 3),
+  var4 = generate_ts(n_months, trend = 0.05, seasonal_amp = 3, noise_level = 1)
+)
+
+# Convert your date column to proper date format and set up time series objects
+prepare_ts_data <- function(df) {
+  df$date <- as.Date(paste("01", df$date), format = "%d %b %Y")
+  return(df)
+}
+
+# Fit auto.arima and create forecasts for each variable
+fit_and_forecast <- function(data, variable, h = 24) {
+  ts_data <- ts(data[[variable]], frequency = 12)
+  model <- auto.arima(ts_data)
+  forecast_result <- forecast(model, h = h)
+  
+  # Create dataframe with historical + forecast values
+  dates <- seq(from = min(data$date), 
+               by = "month", 
+               length.out = length(ts_data) + h)
+  
+  result_df <- data.frame(
+    date = dates,
+    value = c(ts_data, forecast_result$mean),
+    lower = c(rep(NA, length(ts_data)), forecast_result$lower[, 2]),
+    upper = c(rep(NA, length(ts_data)), forecast_result$upper[, 2]),
+    variable = variable,
+    type = c(rep("Historical", length(ts_data)), 
+             rep("Forecast", h))
+  )
+  
+  return(list(
+    forecast_df = result_df,
+    model = model
+  ))
+}
+
+# Process all variables and create plots
+analyze_and_plot <- function(mydf) {
+  # Prepare data
+  df_clean <- prepare_ts_data(mydf)
+  
+  # Fit models and get forecasts for each variable
+  variables <- c("var1", "var2", "var3", "var4")
+  all_results <- lapply(variables, function(var) {
+    fit_and_forecast(df_clean, var)
+  })
+  
+  # Combine all forecast dataframes
+  all_forecasts <- do.call(rbind, lapply(all_results, function(x) x$forecast_df))
+  
+  # Create plot
+  p <- ggplot(all_forecasts, aes(x = date, y = value, color = variable)) +
+    geom_line(aes(linetype = type)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = variable), 
+                alpha = 0.2, color = NA) +
+    facet_wrap(~variable, scales = "free_y", ncol = 2) +
+    theme_minimal() +
+    labs(title = "Historical Data and 24-Month Forecasts",
+         x = "Date",
+         y = "Value") +
+    scale_linetype_manual(values = c("Historical" = "solid", 
+                                    "Forecast" = "dashed")) +
+    theme(legend.position = "bottom")
+  
+  # Print model summaries
+  for(i in seq_along(variables)) {
+    cat("\nModel Summary for", variables[i], ":\n")
+    print(summary(all_results[[i]]$model))
+  }
+  
+  return(p)
+}
+
+# Run the analysis and create the plot
+plot <- analyze_and_plot(mydf)
+print(plot)
+
+# If you want to see the first few rows of the simulated data:
+head(mydf)
