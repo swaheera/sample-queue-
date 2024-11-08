@@ -1,0 +1,62 @@
+library(tidyr)
+library(lubridate)
+library(dplyr)
+
+url <- "https://www.ircc.canada.ca/opendata-donneesouvertes/data/EN_ODP-TR-Work-IMP_PT_NOC4.xlsx"
+destination <- paste0(getwd(), "/test.xlsx")
+download.file(url, destination, mode = "wb")
+mydf <- read_excel("test.xlsx")
+
+# 1. Rows with all quarters (Q1, Q2, Q3, Q4)
+quarters_rows <- mydf[apply(mydf, 1, function(x) all(c("Q1", "Q2", "Q3", "Q4") %in% x)), ]
+print("Rows with all quarters:")
+print(head(quarters_rows))
+
+# 2. Rows with all years (2018-2024)
+years_rows <- mydf[apply(mydf, 1, function(x) all(as.character(2018:2024) %in% x)), ]
+print("\nRows with all years:")
+print(head(years_rows))
+
+# 3. Rows with all months (jan, feb, mar)
+months_rows <- mydf[apply(mydf, 1, function(x) all(c("jan", "feb", "mar") %in% tolower(x))), ]
+print("\nRows with all months:")
+print(head(months_rows))
+
+# 4. Rows containing both specific numbers
+
+specific_numbers <- mydf[apply(mydf, 1, function(x) all(c("14,215") %in% x)), ]
+
+final = rbind(quarters_rows, years_rows, months_rows, specific_numbers)
+z = data.frame(t(final))
+rownames(z) = NULL
+
+z$X4 <- as.numeric(gsub(",", "", z$X4))
+
+
+# Remove commas and convert to numeric for X4
+z$X4 <- as.numeric(gsub(",", "", z$X4))
+
+# Fill down NA values in X1 and X2
+z <- fill(z, X1, X2, .direction = "down")
+
+z = na.omit(z)
+
+
+# Remove rows containing total in any column
+z = z %>% filter(!grepl("Total", X3))
+
+
+# Fill down NAs
+z <- fill(z, X1, X2, .direction = "down")
+
+# Create date column
+month_lookup <- c("Jan" = "01", "Feb" = "02", "Mar" = "03",
+                "Apr" = "04", "May" = "05", "Jun" = "06",
+                "Jul" = "07", "Aug" = "08", "Sep" = "09",
+                "Oct" = "10", "Nov" = "11", "Dec" = "12")
+
+z$date <- ymd(ifelse(z$X3 %in% names(month_lookup),
+                   paste(z$X2, month_lookup[z$X3], "01"),
+                   NA))
+
+z
