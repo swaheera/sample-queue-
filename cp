@@ -1,30 +1,38 @@
-# Download URL with date range
-url <- "https://www150.statcan.gc.ca/t1/tbl1/en/dtl!downloadDbLoadingData-nonTraduit.action?pid=1710000901&latestN=0&startDate=2000-01-01&endDate=2024-07-01&csvLocale=en&selectedMembers=%5B%5B1%2C2%2C3%2C4%2C5%2C6%2C7%2C8%2C9%2C10%2C11%2C12%2C14%2C15%5D%5D&checkedLevels="
+# Set the URL for the ZIP file
+url <- "https://www150.statcan.gc.ca/n1/tbl/csv/17100009-eng.zip"
 
-# Create a temporary file
-temp_file <- tempfile(fileext = ".csv")
+# Create temporary files for both the zip and the extracted content
+temp_zip <- tempfile(fileext = ".zip")
+temp_dir <- tempdir()
 
-# Download the file
-download.file(url = url,
-             destfile = temp_file,
-             mode = "wb",
-             method = "auto")
-
-# Read and filter data
-data <- read.csv(temp_file)
-
-# Filter for Canada and select only REF_DATE and VALUE
-canada_data <- data[data$GEO == "Canada", c("REF_DATE", "VALUE")]
-
-# Optional: Convert to data frame and arrange by date
-canada_data <- as.data.frame(canada_data)
-canada_data <- canada_data[order(canada_data$REF_DATE), ]
-
-# Check the first few rows
-head(canada_data)
-
-# Check dimensions
-cat("\nDimensions of filtered data:", dim(canada_data))
-
-# Clean up temporary file
-unlink(temp_file)
+tryCatch({
+  # Download the ZIP file
+  download.file(
+    url = url,
+    destfile = temp_zip,
+    mode = "wb",
+    method = "auto"
+  )
+  
+  # Unzip the file
+  unzip(temp_zip, exdir = temp_dir)
+  
+  # Find the CSV file in the extracted contents
+  csv_file <- list.files(temp_dir, pattern = "\\.csv$", full.names = TRUE)[1]
+  
+  # Read the data
+  data <- read.csv(csv_file)
+  
+  # Process the data
+  canada_data <- data[data$GEO == "Canada", c("REF_DATE", "VALUE")]
+  canada_data <- canada_data[order(canada_data$REF_DATE), ]
+  
+  # Verify the date range
+  print(paste("Date range:", min(data$REF_DATE), "to", max(data$REF_DATE)))
+  
+}, error = function(e) {
+  print(paste("Error occurred:", e))
+}, finally = {
+  # Clean up temporary files
+  if(file.exists(temp_zip)) file.remove(temp_zip)
+})
