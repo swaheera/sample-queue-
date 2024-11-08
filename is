@@ -59,4 +59,19 @@ z$date <- ymd(ifelse(z$X3 %in% names(month_lookup),
                    paste(z$X2, month_lookup[z$X3], "01"),
                    NA))
 
-z
+z <- z %>%
+  mutate(month = case_when(
+    col1 == "Jan" ~ "01",
+    col1 == "Feb" ~ "02",
+    col1 == "Mar" ~ "03",
+    col1 == "Apr" ~ "04",
+    col1 == "May" ~ "05",
+    col1 == "Jun" ~ "06",
+    col1 == "Jul" ~ "07",
+    col1 == "Aug" ~ "08",
+    col1 == "Sep" ~ "09",
+    col1 == "Oct" ~ "10",
+    col1 == "Nov" ~ "11",
+    col1 == "Dec" ~ "12",
+    TRUE ~ NA_character_  # handles any other values
+  ))
