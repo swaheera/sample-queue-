@@ -1,0 +1,334 @@
+# Load required libraries
+library(shiny)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(DT)
+
+# Define the UI
+ui <- fluidPage(
+    titlePanel("Multi-Plot Time Series Visualization"),
+    
+    sidebarLayout(
+        sidebarPanel(
+            # Add file input at the top
+            fileInput("file_upload", "Upload CSV File",
+                     accept = c(
+                         "text/csv",
+                         "text/comma-separated-values,text/plain",
+                         ".csv")
+            ),
+            
+            # Help text for expected file format
+            helpText("Please upload a CSV file with a 'year' column and numeric variables."),
+            
+            # Conditional panel that only shows other controls after file upload
+            conditionalPanel(
+                condition = "output.data_loaded",
+                
+                # Control for number of plots
+                numericInput("num_plots",
+                            "Number of plots:",
+                            value = 1,
+                            min = 1,
+                            max = 5),
+                
+                # Dynamic UI for plot configurations
+                uiOutput("plot_configs"),
+                
+                hr(),
+                
+                checkboxInput("add_points", "Show points", TRUE),
+                
+                selectInput("color_scheme", "Color scheme:",
+                           choices = c("Default" = "default",
+                                     "Viridis" = "viridis",
+                                     "Set1" = "Set1")),
+                
+                # Future projections section
+                hr(),
+                h4("Future Projections"),
+                numericInput("num_future_years",
+                           "Number of future years to project:",
+                           value = 5,
+                           min = 1,
+                           max = 20,
+                           step = 1),
+                hr(),
+                h4("Enter Future Values"),
+                textOutput("year_range_text"),
+                helpText("Enter values separated by commas (e.g., 10.5, 11.2, 12.0)"),
+                uiOutput("future_inputs")
+            )
+        ),
+        
+        mainPanel(
+            # Add a message for data loading status
+            textOutput("loading_status"),
+            
+            tabsetPanel(
+                tabPanel("Plots", 
+                        uiOutput("plot_panels")
+                ),
+                tabPanel("Data", 
+                        br(),
+                        DTOutput("dataTable"))
+            )
+        )
+    )
+)
+
+server <- function(input, output, session) {
+    # Create reactive value to store uploaded data
+    data_store <- reactiveVal(NULL)
+    
+    # Handle file upload
+    observeEvent(input$file_upload, {
+        req(input$file_upload)
+        
+        # Read the CSV file
+        tryCatch({
+            df <- read.csv(input$file_upload$datapath)
+            
+            # Validate that the data has a year column
+            if(!"year" %in% tolower(names(df))) {
+                showNotification("Error: CSV must contain a 'year' column", type = "error")
+                return(NULL)
+            }
+            
+            # Store the data
+            data_store(df)
+            
+        }, error = function(e) {
+            showNotification(paste("Error reading file:", e$message), type = "error")
+        })
+    })
+    
+    # Reactive to check if data is loaded
+    output$data_loaded <- reactive({
+        !is.null(data_store())
+    })
+    outputOptions(output, 'data_loaded', suspendWhenHidden = FALSE)
+    
+    # Display loading status
+    output$loading_status <- renderText({
+        if(is.null(data_store())) {
+            "Please upload a CSV file to begin."
+        } else {
+            "Data loaded successfully!"
+        }
+    })
+    
+    # Generate plot configuration UI
+    output$plot_configs <- renderUI({
+        req(data_store())
+        req(input$num_plots)
+        
+        # Get numerical columns from the uploaded data
+        numeric_cols <- names(select_if(data_store(), is.numeric))
+        numeric_cols <- setdiff(numeric_cols, "year")  # Remove year column
+        
+        # Create named vector for selection
+        all_vars <- setNames(numeric_cols, paste("Variable", seq_along(numeric_cols)))
+        
+        # Create configuration panels for each plot
+        plot_configs <- lapply(1:input$num_plots, function(i) {
+            tagList(
+                h4(paste("Plot", i, "Configuration")),
+                textInput(paste0("plot_", i, "_title"),
+                         "Plot Title:",
+                         value = paste("Plot", i)),
+                selectInput(paste0("plot_", i, "_vars"),
+                          "Select Variables:",
+                          choices = all_vars,
+                          multiple = TRUE),
+                textInput(paste0("plot_", i, "_ylabel"),
+                         "Y-axis Label:",
+                         value = "Value"),
+                hr()
+            )
+        })
+        
+        do.call(tagList, plot_configs)
+    })
+    
+    # Generate plot panels (same as before)
+    output$plot_panels <- renderUI({
+        req(input$num_plots)
+        
+        plot_outputs <- lapply(1:input$num_plots, function(i) {
+            plotOutput(paste0("plot_", i), height = "400px")
+        })
+        
+        do.call(tagList, plot_outputs)
+    })
+    
+    # Create reactive expression for selected variables
+    selected_vars <- reactive({
+        req(input$num_plots)
+        unique(unlist(lapply(1:input$num_plots, function(i) {
+            input[[paste0("plot_", i, "_vars")]]
+        })))
+    })
+    
+    # Future inputs UI
+    output$year_range_text <- renderText({
+        req(input$num_future_years, data_store())
+        max_year <- max(data_store()$year)
+        start_year <- max_year + 1
+        end_year <- start_year + input$num_future_years - 1
+        paste("Projecting from year", start_year, "to", end_year)
+    })
+    
+    output$future_inputs <- renderUI({
+        req(selected_vars(), input$num_future_years, data_store())
+        
+        input_list <- lapply(selected_vars(), function(var) {
+            var_mean <- mean(data_store()[[var]], na.rm = TRUE)
+            var_name <- paste("Variable", var)
+            
+            tags$div(
+                style = "margin-bottom: 10px;",
+                tags$div(
+                    style = "display: flex; align-items: center; gap: 10px;",
+                    tags$label(
+                        style = "flex: 0 0 120px; font-weight: bold;",
+                        var_name
+                    ),
+                    textInput(
+                        inputId = paste0(var, "_future"),
+                        label = NULL,
+                        value = paste(rep(round(var_mean, 2), input$num_future_years), collapse = ", "),
+                        width = "100%"
+                    )
+                )
+            )
+        })
+        
+        tags$div(input_list)
+    })
+    
+    # Helper function to parse comma-separated values
+    parse_future_values <- function(input_string) {
+        if (is.null(input_string) || input_string == "") return(NULL)
+        values <- as.numeric(trimws(strsplit(input_string, ",")[[1]]))
+        if (any(is.na(values))) return(NULL)
+        return(values)
+    }
+    
+    # Get combined dataset
+    get_plot_data <- reactive({
+        req(selected_vars(), input$num_future_years, data_store())
+        
+        # Get historical data
+        current_data <- data_store() %>%
+            select(year, all_of(selected_vars())) %>%
+            pivot_longer(cols = -year,
+                        names_to = "variable",
+                        values_to = "value")
+        
+        # Calculate future years range
+        max_year <- max(data_store()$year)
+        start_year <- max_year + 1
+        future_years <- start_year:(start_year + input$num_future_years - 1)
+        
+        # Create future data frame
+        future_data <- data.frame()
+        
+        # Process each variable's future values
+        for (var in selected_vars()) {
+            input_id <- paste0(var, "_future")
+            values <- parse_future_values(input[[input_id]])
+            
+            if (!is.null(values) && length(values) == length(future_years)) {
+                var_data <- data.frame(
+                    year = future_years,
+                    variable = var,
+                    value = values
+                )
+                future_data <- rbind(future_data, var_data)
+            }
+        }
+        
+        if (nrow(future_data) > 0) {
+            return(bind_rows(current_data, future_data))
+        } else {
+            return(current_data)
+        }
+    })
+    
+    # Create individual plots
+    observe({
+        req(input$num_plots, data_store())
+        
+        plot_data <- get_plot_data()
+        
+        for(i in 1:input$num_plots) {
+            local({
+                local_i <- i
+                
+                output[[paste0("plot_", local_i)]] <- renderPlot({
+                    # Get variables for this plot
+                    plot_vars <- input[[paste0("plot_", local_i, "_vars")]]
+                    if(is.null(plot_vars) || length(plot_vars) == 0) return(NULL)
+                    
+                    # Filter data for selected variables
+                    plot_data_subset <- plot_data %>%
+                        filter(variable %in% plot_vars)
+                    
+                    # Create the plot
+                    p <- ggplot(plot_data_subset, 
+                              aes(x = year, y = value, color = variable)) +
+                        theme_minimal() +
+                        labs(title = input[[paste0("plot_", local_i, "_title")]],
+                             x = "Year",
+                             y = input[[paste0("plot_", local_i, "_ylabel")]],
+                             color = "Variables")
+                    
+                    # Add lines with different styles for historical vs future data
+                    max_year <- max(data_store()$year)
+                    p <- p + 
+                        geom_line(data = subset(plot_data_subset, year <= max_year), 
+                                linewidth = 1) +
+                        geom_line(data = subset(plot_data_subset, year > max_year),
+                                linewidth = 1, 
+                                linetype = "dashed")
+                    
+                    if(input$add_points) {
+                        p <- p + geom_point(alpha = 0.5)
+                    }
+                    
+                    if(input$color_scheme == "viridis") {
+                        p <- p + scale_color_viridis_d()
+                    } else if(input$color_scheme == "Set1") {
+                        p <- p + scale_color_brewer(palette = "Set1")
+                    }
+                    
+                    p
+                })
+            })
+        }
+    })
+    
+    # Render the data table
+    output$dataTable <- renderDT({
+        req(data_store())
+        data <- get_plot_data()
+        
+        data_wide <- data %>%
+            pivot_wider(names_from = variable,
+                       values_from = value) %>%
+            arrange(year)
+        
+        datatable(data_wide,
+                  options = list(
+                      pageLength = 15,
+                      scrollX = TRUE,
+                      scrollY = "500px"
+                  )) %>%
+            formatRound(columns = setdiff(names(data_wide), "year"), digits = 2)
+    })
+}
+
+# Run the Shiny app
+shinyApp(ui = ui, server = server)
