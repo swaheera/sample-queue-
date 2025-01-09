@@ -1,0 +1,120 @@
+# Load required libraries 
+# sf: Handles spatial (geographic) data and operations
+# dplyr: Makes data manipulation more intuitive with functions like filter() and select()
+# ggplot2: Creates professional visualizations
+# tidyr: Helps clean and restructure data
+# stringr: Provides tools for working with text data
+# RColorBrewer: Offers carefully designed color palettes for maps
+library(sf)          
+library(dplyr)       
+library(ggplot2)     
+library(tidyr)       
+library(stringr)     
+library(RColorBrewer)
+
+# Step 1: Download and process census LICO (Low-Income Cut-Off) data
+# We're creating temporary storage to handle the downloaded files efficiently
+# This approach prevents cluttering your working directory
+census_url <- "https://www12.statcan.gc.ca/census-recensement/2021/dp-pd/prof/details/download-telecharger/comp/GetFile.cfm?Lang=E&FILETYPE=CSV&GEONO=013"
+census_temp <- tempfile()
+download.file(census_url, census_temp, mode = "wb")
+
+# Extract the census data to a temporary directory
+# The unzip() function extracts all files, but we only want the CSV
+census_dir <- tempdir()
+unzipped_census_files <- unzip(census_temp, exdir = census_dir)
+census_file <- unzipped_census_files[grepl(".csv$", unzipped_census_files)]
+
+# Process the census data, focusing on LICO information
+# We filter for rows containing "low income" and ensure we get the right characteristic
+# by checking the string length (82 characters identifies the specific LICO metric we want)
+census_data <- read.csv(census_file, stringsAsFactors = FALSE)
+lico_data <- census_data %>%
+    filter(grepl("low income", CHARACTERISTIC_NAME, ignore.case = TRUE)) %>%
+    filter(nchar(CHARACTERISTIC_NAME) == 82) %>%
+    select(GEO_NAME, CHARACTERISTIC_NAME, C1_COUNT_TOTAL) %>%
+    rename(CFSAUID = GEO_NAME)  # Rename to match the shapefile's column name
+
+# Step 2: Download and process geographic boundary files (shapefiles)
+# These files contain the actual geographic boundaries of each Forward Sortation Area (FSA)
+shapefile_url <- "https://www12.statcan.gc.ca/census-recensement/2021/geo/sip-pis/boundary-limites/files-fichiers/lfsa000b21a_e.zip"
+shapefile_temp <- tempfile()
+download.file(shapefile_url, shapefile_temp, mode = "wb")
+
+# Extract the shapefile to a temporary directory
+# Shapefiles actually consist of multiple files (.shp, .dbf, .prj, etc.)
+shape_dir <- tempdir()
+unzipped_shape_files <- unzip(shapefile_temp, exdir = shape_dir)
+shp_file <- unzipped_shape_files[grepl("\\.shp$", unzipped_shape_files)]
+
+# Read and process the geographic data
+# We use specific encoding to handle French characters correctly
+sf <- st_read(shp_file, options = "ENCODING=WINDOWS-1252")
+
+# Transform to WGS84 projection (standard for web maps)
+st_trans <- st_transform(sf, 4326)
+
+# Remove northern territories for better visualization of populated areas
+st_trans <- subset(st_trans, !st_trans$PRNAME %in% c("Yukon", 
+                                                    "Nunavut", 
+                                                    "Northwest Territories/Territoires du Nord-Ouest"))
+
+# Step 3: Clean and optimize the geographic data
+# First, ensure all geometries are valid (fixes any topology issues)
+st_trans <- st_make_valid(st_trans)
+
+# Apply a zero-width buffer to clean up tiny inconsistencies
+# This step helps smooth out problematic areas while preserving the overall shape
+st_trans <- st_buffer(st_trans, dist = 0)
+
+# Simplify the geometries to improve rendering speed
+# preserveTopology=TRUE ensures we don't create new geometric problems
+# dTolerance=0.01 provides a good balance between detail and performance
+st_trans <- st_simplify(st_trans, dTolerance = 0.01, preserveTopology = TRUE)
+
+# Match LICO data to FSAs using the CFSAUID field
+st_trans$total <- lico_data$C1_COUNT_TOTAL[match(st_trans$CFSAUID, lico_data$CFSAUID)]
+
+# Remove any rows with missing data to ensure clean visualization
+st_trans <- na.omit(st_trans)
+
+# Clean up temporary files to free memory
+unlink(list.files(tempdir(), full.names = TRUE, recursive = TRUE))
+gc()
+
+# Print summary statistics to verify our data
+print("Summary of LICO rates:")
+summary(st_trans$total)
+print(paste("Number of FSAs included:", nrow(st_trans)))
+
+# Define breaks for the choropleth map
+# These breaks create meaningful categories that make patterns easier to see
+breaks <- c(0, 5, 10, 15, 20, 25, 30, 35, Inf)
+
+# Create a color palette using YlOrRd (Yellow-Orange-Red)
+# This creates an intuitive progression from low values (light yellow) 
+# to high values (dark red)
+myPalette <- colorRampPalette(brewer.pal(9, "YlOrRd"))(length(breaks)-1)
+
+# Create the optimized visualization
+# We use several techniques to improve rendering speed while maintaining quality
+plot <- ggplot() +
+    geom_sf(data = st_trans, 
+            aes(fill = cut(total, breaks = breaks)), 
+            alpha = 0.8,            # Slight transparency for better visibility
+            colour = "white",       # White borders between areas
+            size = 0.1) +          # Thin borders to reduce visual noise
+    scale_fill_manual(values = myPalette, 
+                     name = "LICO-AT Rate (%)") +
+    labs(title = "Low-Income Cut-Off Rates by Forward Sortation Area",
+         subtitle = "Based on 2021 Census Data (Northern Territories Excluded)",
+         caption = "Source: Statistics Canada") +
+    theme_void() +                 # Clean theme without grid lines
+    coord_sf(datum = NA)           # Removes graticules for faster rendering
+
+# Save the plot directly to a file
+# This is more efficient than viewing in R's plot window
+ggsave("lico_map.png", plot, width = 10, height = 8, dpi = 300, device = "png")
+
+# If you need to view the plot in R, uncomment the next line
+# print(plot)
